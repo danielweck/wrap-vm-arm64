@@ -1,4 +1,19 @@
-FROM archlinux:latest
+# arm64 (aarch64) variant for Apple Silicon hosts.
+# Keep the shared runtime, shell and lazy-toolchain setup in sync with
+# ./Containerfile. Arch Linux ARM supplies the base, mirrorlist and keyring;
+# mise falls back to its upstream installer when absent from the package repos.
+# A toolchain group keeps /opt/mise writable after the session uid changes,
+# avoiding an expensive overlay copy-up of the entire tree.
+#
+#   docker buildx build --platform linux/arm64 --load -f Containerfile.arm64 \
+#     -t wrap-arm64:local .
+#ARG BASE_IMAGE=docker.io/lopsided/archlinux:devel
+#ARG BASE_IMAGE=arch-arm64:local
+ARG BASE_IMAGE=lfdevs/archlinux-ports:base-devel
+FROM ${BASE_IMAGE}
+#https://github.com/lfdevs/archlinuxarm-docker/tree/ports
+#curl -LO http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+#docker import ArchLinuxARM-aarch64-latest.tar arch-arm64:local
 
 # ---------------------------------------------------------------------------
 # Toolchain lives at absolute paths under /opt, NOT under $HOME.
@@ -43,15 +58,23 @@ ENV HOME=/root \
 ENV WRAP_UID=1000 \
     WRAP_GID=1000 \
     WRAP_USER_NAME=user \
-    WRAP_USER_HOME=/home/user
+    WRAP_USER_HOME=/home/user \
+    WRAP_TOOLCHAIN_GID=900 \
+    WRAP_TOOLCHAIN_GROUP=toolchain
 
-# Arch's own geo mirror: it is what wrap's default network allowlist permits
-# (.pkgbuild.com), so `sudo pacman -S` keeps working inside the VM.
-RUN printf '%s\n' 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' > /etc/pacman.d/mirrorlist \
- && pacman-key --init \
- && pacman-key --populate archlinux \
- && pacman -Sy --noconfirm archlinux-keyring \
- && pacman -Syu --noconfirm \
+# Upstream Arch's mirrors and keyring are x86_64-only. Leave ALARM's
+# mirrorlist in place and update its own keyring instead.
+#RUN set -eu; \
+#    if [ "$(uname -m)" = "x86_64" ]; then \
+#      printf '%s\n' 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' > /etc/pacman.d/mirrorlist; \
+#      pacman-key --init; \
+#      pacman-key --populate archlinux; \
+#      pacman -Sy --noconfirm archlinux-keyring; \
+#    else \
+#      pacman -Sy --noconfirm archlinuxarm-keyring; \
+#    fi
+
+RUN pacman -Syu --noconfirm \
       base-devel \
       ca-certificates \
       clang \
@@ -65,7 +88,6 @@ RUN printf '%s\n' 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' > /e
       gnupg \
       jq \
       libyaml \
-      mise \
       nano \
       ninja \
       openssh \
@@ -79,6 +101,13 @@ RUN printf '%s\n' 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' > /e
       which \
       zsh \
       starship \
+ && if pacman -Si mise >/dev/null 2>&1; then \
+      pacman -S --noconfirm mise; \
+    else \
+      curl -fsSL https://mise.run -o /tmp/wrap-mise-install \
+      && MISE_INSTALL_PATH=/usr/bin/mise sh /tmp/wrap-mise-install \
+      && rm /tmp/wrap-mise-install; \
+    fi \
  && install -d /opt/mise/config/conf.d /opt/wrap/bin /etc/wrap \
  && if ! grep -qx '/bin/zsh' /etc/shells; then echo /bin/zsh >> /etc/shells; fi \
  && if ! grep -qx '/usr/bin/zsh' /etc/shells; then echo /usr/bin/zsh >> /etc/shells; fi \
@@ -87,7 +116,7 @@ RUN printf '%s\n' 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch' > /e
 
 # Declare tools without downloading them. reshim creates mise's bootstrap
 # commands; first use installs just the requested tool, later uses auto-update.
-# mise itself is an Arch package, updated with pacman rather than self-update.
+# mise comes from pacman when available, or the upstream installer on ALARM.
 COPY resources/mise.toml /opt/mise/config/config.toml
 RUN mise reshim
 
@@ -98,18 +127,29 @@ RUN mise reshim
 # /opt/mise is owned by that uid too: the toolchain lives at a HOME-independent
 # path, but `user` must be able to `mise use`/`mise install` into it without
 # sudo. root still reads it fine (a+rX).
+#
+# Group write and setgid directories preserve access after uid realignment
+# without recursively chowning /opt/mise in each VM. The nologin `builder`
+# entry gives the original uid a name after `user` moves to the host uid;
+# it follows `user` so getpwuid still prefers the live account before that.
 # ---------------------------------------------------------------------------
 RUN groupadd -g "${WRAP_GID}" "${WRAP_USER_NAME}" 2>/dev/null || true \
+ && groupadd -g "${WRAP_TOOLCHAIN_GID}" "${WRAP_TOOLCHAIN_GROUP}" 2>/dev/null || true \
  && useradd -m -d "${WRAP_USER_HOME}" -u "${WRAP_UID}" -g "${WRAP_GID}" \
       -s /bin/zsh "${WRAP_USER_NAME}" 2>/dev/null || true \
- && usermod -aG wheel "${WRAP_USER_NAME}" \
+ && useradd -o -u "${WRAP_UID}" -g "${WRAP_TOOLCHAIN_GROUP}" -M -d /opt/mise \
+      -s /usr/bin/nologin builder 2>/dev/null || true \
+ && usermod -aG wheel,"${WRAP_TOOLCHAIN_GROUP}" "${WRAP_USER_NAME}" \
  && printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "${WRAP_USER_NAME}" \
       > /etc/sudoers.d/10-wrap-user \
  && printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/11-wrap-wheel \
  && chmod 0440 /etc/sudoers.d/10-wrap-user /etc/sudoers.d/11-wrap-wheel \
  && visudo -c \
  && install -d -o "${WRAP_UID}" -g "${WRAP_GID}" "${WRAP_USER_HOME}/workspace" \
- && chown -R "${WRAP_UID}:${WRAP_GID}" "${WRAP_USER_HOME}" /opt/mise \
+ && chown -R "${WRAP_UID}:${WRAP_GID}" "${WRAP_USER_HOME}" \
+ && chown -R "${WRAP_UID}:${WRAP_TOOLCHAIN_GID}" /opt/mise \
+ && chmod -R g+rwX /opt/mise \
+ && find /opt/mise -type d -exec chmod g+s {} + \
  && chmod 0755 "${WRAP_USER_HOME}"
 
 # ---------------------------------------------------------------------------

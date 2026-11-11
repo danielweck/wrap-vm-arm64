@@ -1,3 +1,20 @@
+# THIS FORK: support for ARM64 Apple Silicon, merged "desktop" `wrapvm` into base `wrap`
+
+* See https://github.com/tobi/wrapvm
+* See https://github.com/tobi/wrapvm/pull/2
+
+## 1 Build with Docker:
+
+* `docker buildx build --platform linux/arm64 --load -f Containerfile -t wrap-arm64:local .`
+* `docker buildx build --platform linux/arm64 --load -f Containerfile.desktop -t wrapvm-arm64:local .`
+
+## 2 Run with Apple Container (MicroVM):
+
+* `docker save -o /tmp/wrapvm-arm64.tar wrapvm-arm64:local`
+* `container image load --input /tmp/wrapvm-arm64.tar`
+
++ `container build ...` to customise image or `container run ...` to execute directly.
+
 # wrap
 
 Run commands and coding agents in a disposable Arch Linux microVM built around the folder you are in.

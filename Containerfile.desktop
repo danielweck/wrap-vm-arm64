@@ -1,11 +1,15 @@
+# wrapvm: tobi/wrap's desktop (Containerfile.desktop at c562a7d) plus ffmpeg and
+# a workspace agent-browser config. This file is the one definition of the VM:
+# CI publishes it as ghcr.io/tobi/wrapvm:desktop, which the Smolfile boots.
+#
 # wrap desktop: base image + a headless X desktop (Xvfb + XFCE), one persistent
 # Google Chrome on that desktop with CDP on localhost:9222 and every first-run/
 # setup prompt suppressed system-wide, and agent-browser preconfigured to attach
 # to that Chrome — so a human (in the browser viewer) and the agent share the
 # same browser.
 #
-#   docker run -d ghcr.io/tobi/wrap:desktop              # desktop + chrome up
-#   docker run -it ghcr.io/tobi/wrap:desktop             # shell, desktop autostarts
+#   docker run -d ghcr.io/tobi/wrapvm:desktop            # desktop + chrome up
+#   docker run -it ghcr.io/tobi/wrapvm:desktop           # shell, desktop autostarts
 #   -e WRAP_DESKTOP_AUTOSTART=0                          # opt out of autostart
 #
 # The viewer, voxl on :6080, listens on all guest interfaces so the VM/container
@@ -14,7 +18,20 @@
 # and refuses other sites' pages. Chrome only binds CDP to 127.0.0.1:9222 (it
 # ignores --remote-debugging-address with a window), so a socat forwarder serves
 # it on all guest interfaces at :9223.
-ARG BASE_IMAGE=ghcr.io/tobi/wrap:latest
+#
+# Both architectures come out of this one file. On amd64 the shared browser is
+# Google Chrome from its .deb; on arm64 it is Arch Linux ARM's Chromium, because
+# Google publishes no linux-arm64 Chrome and the amd64 build cannot stand in for
+# it (under qemu-user Chrome dies with an internal SIGTRAP before CDP is up).
+# BuildKit's automatic TARGETARCH picks the branch, so `docker build .` on an
+# arm64 host and `buildx build --platform linux/arm64` both do the right thing;
+# on arm64 the base image is tobi/wrap's Containerfile.arm64 build (see
+# README), since ghcr.io/tobi/wrap:latest is amd64-only.
+#ARG BASE_IMAGE=ghcr.io/tobi/wrap:latest
+#docker buildx build --platform linux/arm64 --load -f Containerfile -t wrap-arm64:local .
+#docker buildx build --platform linux/arm64 --load -f Containerfile.desktop -t wrapvm-arm64:local .
+ARG BASE_IMAGE=wrap-arm64:local
+#https://github.com/tobi/wrapvm/pull/2/
 
 # ---------------------------------------------------------------------------
 # voxl (github.com/tembo/voxl) is the viewer: it streams :1 to a browser as
@@ -28,7 +45,11 @@ FROM ${BASE_IMAGE} AS voxl
 # The base puts mise's shims first on PATH, and cargo there is a lazy install.
 # Arch's own rust is the toolchain here.
 ENV HOME=/root USER=root CARGO_HOME=/tmp/cargo PATH=/usr/bin:/bin
-RUN pacman -Syu --noconfirm --needed rust esbuild x264 libyuv opus libpulse \
+# --disable-sandbox: pacman 7.1 wraps its databases in a Landlock sandbox that
+# BuildKit's seccomp profile refuses ("restricting filesystem access failed"),
+# so every pacman call in this file passes it. Requires pacman >= 7.1, which
+# both wrap bases have.
+RUN pacman -Syu --disable-sandbox --noconfirm --needed rust esbuild x264 libyuv opus libpulse \
  && rm -rf /var/cache/pacman/pkg/*
 # Arch's libyuv ships no pkg-config file, and voxl's build.rs asks pkg-config
 # for every library it links.
@@ -66,6 +87,10 @@ RUN sed -i 's/^bindgen = "0.71"$/bindgen = "0.72"/' Cargo.toml \
 
 FROM ${BASE_IMAGE}
 
+# BuildKit's automatic platform arg, re-declared here because a global ARG is not
+# in scope inside a stage. Picks the browser install below (Chrome / Chromium).
+ARG TARGETARCH
+
 # Build steps run as root; keep root's droppings out of the user's home. The
 # runtime identity (HOME=/home/user) is restored at the end of the file.
 ENV HOME=/root USER=root
@@ -84,24 +109,31 @@ ENV DISPLAY=:1 \
     WRAP_DESKTOP_CDP_PORT=9222 \
     WRAP_DESKTOP_CDP_PUBLIC_PORT=9223 \
     XDG_SESSION_TYPE=x11 \
-    GNOME_ACCESSIBILITY=1
+    GNOME_ACCESSIBILITY=1 \
+    AGENT_BROWSER_CONFIG=/home/user/workspace/agent-browser.json
+# AGENT_BROWSER_CONFIG replaces agent-browser's config discovery with that one
+# file, in the workspace so a person can change it per project; wrap-desktop
+# and login shells write its default when it is missing
+# (see wrap-agent-browser-config below).
 
 # ---------------------------------------------------------------------------
 # X + XFCE + viewer + Chrome runtime deps (Arch repos). XFCE is assembled from
 # components rather than the `xfce4` group to skip power-manager, screensaver,
 # pulseaudio plugin and friends — nothing here should ever lock or dim :1.
-# x264, libyuv, opus and libpulse are what the voxl binary links (libpulse is
-# the client library only; no sound server runs, so voxl's audio is off).
+# x264, libyuv, opus and libpulse are what the voxl binary links.
+# wrapvm: pulseaudio is the desktop's sound card, a null sink that voxl streams
+# to the viewer; pulseaudio-alsa routes ALSA's default device into it.
 # ---------------------------------------------------------------------------
-RUN pacman -Syu --noconfirm --needed \
+RUN pacman -Syu --disable-sandbox --noconfirm --needed \
       xorg-server-xvfb xorg-xauth xorg-xdpyinfo xorg-xset xorg-xrandr xdotool \
       scrot socat x264 libyuv opus libpulse \
       dbus xfce4-session xfwm4 xfdesktop xfce4-panel xfce4-settings xfconf \
       xfce4-terminal thunar xfce4-appfinder garcon adwaita-icon-theme \
       ttf-dejavu ttf-liberation noto-fonts noto-fonts-emoji \
-      alsa-lib gtk3 libcups libxss libxtst nss xdg-utils at-spi2-core \
+      alsa-lib gtk3 libcups libxss libxtst nss xdg-utils at-spi2-core procps-ng \
       libxrandr libxcomposite libxdamage libxkbcommon libdrm mesa pango cairo \
       libxshmfence vulkan-icd-loader \
+      ffmpeg pulseaudio pulseaudio-alsa \
  && dbus-uuidgen --ensure=/etc/machine-id \
  && rm -rf /var/cache/pacman/pkg/*
 
@@ -197,24 +229,55 @@ COPY --from=voxl /opt/voxl/bin/voxl /usr/local/bin/voxl
 RUN LD_BIND_NOW=1 voxl --version
 
 # ---------------------------------------------------------------------------
-# Google Chrome stable, straight from Google's .deb (the AUR package does the
-# same thing). No dpkg needed: bsdtar unpacks data.tar.* onto /. Cron/apt
-# repo hooks from the package are dropped.
+# The shared browser, one install per architecture, both ending at the same
+# path: /usr/lib/wrap/browser, which every launcher below execs.
+#
+#  amd64 — Google Chrome stable, straight from Google's .deb (the AUR package
+#          does the same thing). No dpkg needed: bsdtar unpacks data.tar.* onto
+#          /. Cron/apt repo hooks from the package are dropped.
+#  arm64 — Arch Linux ARM's Chromium. Google ships no linux-arm64 Chrome, and
+#          the amd64 build dies under qemu-user emulation (internal SIGTRAP)
+#          before CDP is up, so emulating it is not an option. Chromium is the
+#          same engine: CDP, policies, initial_preferences and agent-browser's
+#          autoConnect work the same way. It has no Widevine and no Google
+#          auto-update, and its icon is aliased to google-chrome so the dock,
+#          the .desktop entry and XFCE's helper keep resolving.
 # ---------------------------------------------------------------------------
-RUN curl -fsSL -o /tmp/chrome.deb \
-      https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
- && bsdtar -xOf /tmp/chrome.deb 'data.tar.*' | bsdtar -x -C / \
- && rm -f /tmp/chrome.deb /etc/cron.daily/google-chrome \
- && rm -rf /opt/google/chrome/cron \
- && ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome-stable \
- && ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome \
- && chmod 4755 /opt/google/chrome/chrome-sandbox \
- && for s in 16 24 32 48 64 128 256; do \
-      install -D -m 0644 "/opt/google/chrome/product_logo_$s.png" \
-        "/usr/share/icons/hicolor/${s}x${s}/apps/google-chrome.png"; \
-    done \
- && gtk-update-icon-cache -f -t /usr/share/icons/hicolor \
- && /opt/google/chrome/google-chrome --version
+RUN set -eu; : "${TARGETARCH:=amd64}"; \
+    install -d /usr/lib/wrap; \
+    if [ "$TARGETARCH" = arm64 ]; then \
+      pacman -S --disable-sandbox --noconfirm --needed chromium; \
+      rm -rf /var/cache/pacman/pkg/*; \
+      chmod 4755 /usr/lib/chromium/chrome-sandbox; \
+      for s in 16 24 32 48 64 128 256; do \
+        src="/usr/share/icons/hicolor/${s}x${s}/apps/chromium.png"; \
+        if [ ! -f "$src" ]; then \
+          src="/usr/share/icons/hicolor/${s}x${s}/apps/chromium-browser.png"; \
+        fi; \
+        if [ -f "$src" ]; then \
+          install -D -m 0644 "$src" \
+            "/usr/share/icons/hicolor/${s}x${s}/apps/google-chrome.png"; \
+        fi; \
+      done; \
+      gtk-update-icon-cache -f -t /usr/share/icons/hicolor || true; \
+      ln -sfn /usr/bin/chromium /usr/lib/wrap/browser; \
+    else \
+      curl -fsSL -o /tmp/chrome.deb \
+        https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; \
+      bsdtar -xOf /tmp/chrome.deb 'data.tar.*' | bsdtar -x -C /; \
+      rm -f /tmp/chrome.deb /etc/cron.daily/google-chrome; \
+      rm -rf /opt/google/chrome/cron; \
+      ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome-stable; \
+      ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome; \
+      chmod 4755 /opt/google/chrome/chrome-sandbox; \
+      for s in 16 24 32 48 64 128 256; do \
+        install -D -m 0644 "/opt/google/chrome/product_logo_$s.png" \
+          "/usr/share/icons/hicolor/${s}x${s}/apps/google-chrome.png"; \
+      done; \
+      gtk-update-icon-cache -f -t /usr/share/icons/hicolor; \
+      ln -sfn /opt/google/chrome/google-chrome /usr/lib/wrap/browser; \
+    fi; \
+    /usr/lib/wrap/browser --version
 # (The .deb's postinst, which we skip, is what normally installs those icons;
 #  the hicolor cache must be rebuilt or GTK trusts the stale one and shows "?".)
 
@@ -230,7 +293,11 @@ RUN curl -fsSL -o /tmp/chrome.deb \
 #     profile creation — no welcome/first-run UI, no import wizard, new-tab
 #     page on startup, bookmarks bar hidden.
 # ---------------------------------------------------------------------------
+# arm64: Chromium reads its policy and initial_preferences directory from
+# /etc/chromium (Chrome's branded path is /etc/opt/chrome). One directory, two
+# names: the symlink keeps a single set of files working for both browsers.
 RUN install -d /etc/opt/chrome/policies/managed /etc/opt/chrome/policies/recommended \
+ && { [ "$TARGETARCH" != arm64 ] || ln -sfn /etc/opt/chrome /etc/chromium; } \
  && cat > /etc/opt/chrome/policies/managed/00-wrap.json <<'EOF'
 {
   "BrowserSignin": 0,
@@ -278,7 +345,7 @@ RUN install -d /etc/opt/chrome/policies/managed /etc/opt/chrome/policies/recomme
   "RemoteDebuggingAllowed": true
 }
 EOF
-RUN cat > /opt/google/chrome/initial_preferences <<'EOF'
+RUN cat > /etc/opt/chrome/initial_preferences <<'EOF'
 {
   "homepage_is_newtabpage": true,
   "browser": {
@@ -309,11 +376,16 @@ RUN cat > /opt/google/chrome/initial_preferences <<'EOF'
   }
 }
 EOF
+# Chrome looks for initial_preferences beside its binary; Chromium looks in
+# /etc/chromium, which the symlink above already points at these files.
+RUN [ "$TARGETARCH" = arm64 ] \
+ || install -D -m 0644 /etc/opt/chrome/initial_preferences /opt/google/chrome/initial_preferences
 
 # Launcher that every consumer goes through (PATH puts /usr/local/bin first,
 # so it shadows the deb's /usr/bin symlink for the .desktop entry too).
 #  - container-safe flags: no /dev/shm reliance, no first-run, no default check
-#  - root gets --no-sandbox (Chrome refuses to start as uid 0 otherwise).
+#  - root gets --no-sandbox (Chrome refuses to start as uid 0 otherwise), and
+#    so does a runtime that refuses Chrome's namespaces (see below).
 #  - user flags, one per line, from ~/.config/chrome-flags.conf (Arch's
 #    google-chrome convention), else /etc/wrap/chrome-flags.conf. They apply to
 #    every launch: the shared desktop Chrome, the dock, and any Chrome that
@@ -335,17 +407,20 @@ while [ "$n" -gt 0 ]; do a=$1; shift; set -- "$@" "$a"; n=$((n - 1)); done
 # Chromium leaves renderer accessibility off until an assistive technology is
 # detected, which on this image nothing does; agent-desktop reads desktop apps
 # through that tree (wrap-a11y switches the bus on).
-set -- --disable-dev-shm-usage --no-first-run --no-default-browser-check \
-       --password-store=basic --force-renderer-accessibility "$@"
-if [ "$(id -u)" = 0 ]; then
+# wrapvm: --no-sandbox only where Chrome cannot have a sandbox: as root, or
+# where the user, PID and network namespaces it needs are refused (Docker's
+# default seccomp profile; Chrome then dies with "failed to move to new
+# namespaces"). smolvm, podman and docker --security-opt seccomp=unconfined
+# allow them, so Chrome keeps its sandbox there. It goes after the fixed flags:
+# what looks for the browser process matches on --disable-dev-shm-usage first.
+if [ "$(id -u)" = 0 ] || ! unshare --user --map-root-user --pid --net --fork true 2>/dev/null; then
   set -- --no-sandbox "$@"
 fi
-exec /opt/google/chrome/google-chrome "$@"
+set -- --disable-dev-shm-usage --no-first-run --no-default-browser-check \
+       --password-store=basic --force-renderer-accessibility "$@"
+exec /usr/lib/wrap/browser "$@"
 EOF
-# Chrome's sandbox needs unprivileged user+pid+net namespaces, which Docker's
-# default seccomp profile refuses (Chrome then aborts: zygote "Failed to move to
-# new namespace"), so the default drops it. Remove --no-sandbox under a runtime
-# that allows them (microVMs, `--security-opt seccomp=unconfined`).
+# wrapvm: no --no-sandbox here; Chrome keeps its sandbox.
 # Chrome honors only the last --enable-features: keep both WebMCP features in
 # any replacement line, or agent-browser's `webmcp` commands find no tools.
 # The page API is the WebMCP feature. Chrome 157 removed WebMCPTesting, which
@@ -353,7 +428,6 @@ EOF
 RUN cat > /etc/wrap/chrome-flags.conf <<'EOF'
 # Extra Google Chrome flags, one per line. Copy to ~/.config/chrome-flags.conf
 # to change them; restart Chrome with `wrap-desktop stop && wrap-desktop start`.
---no-sandbox
 # WebMCP: pages register tools on document.modelContext; agent-browser lists
 # and calls them with `agent-browser webmcp list|invoke`.
 --enable-features=WebMCP,DevToolsWebMCPSupport
@@ -410,6 +484,115 @@ RUN for home in /root /home/user; do \
       cp /etc/skel/.agent-browser/config.json "$home/.agent-browser/config.json"; \
     done \
  && chown -R "${WRAP_UID}:${WRAP_GID}" /home/user/.agent-browser
+
+# wrapvm: agent-browser's config is AGENT_BROWSER_CONFIG, which replaces the
+# ~/.agent-browser/config.json above. It is written once, when missing, from
+# /etc/wrap/agent-browser.json: headed, and attached to the desktop's running
+# Chrome by discovery.
+RUN cat > /etc/wrap/agent-browser.json <<'EOF'
+{
+  "headed": true,
+  "autoConnect": true
+}
+EOF
+RUN cat > /opt/wrap/bin/wrap-agent-browser-config <<'EOF'
+#!/bin/sh
+# Write the default agent-browser config at $AGENT_BROWSER_CONFIG when nothing
+# is there yet and its directory exists. Never overwrites.
+file="${AGENT_BROWSER_CONFIG:-}"
+[ -n "$file" ] && [ ! -e "$file" ] || exit 0
+dir="$(dirname "$file")"
+[ -d "$dir" ] && [ -w "$dir" ] || exit 0
+(set -C; cat /etc/wrap/agent-browser.json > "$file") 2>/dev/null || exit 0
+# Written by root (a sudo -i shell): it still belongs to the workspace's owner.
+[ "$(id -u)" != 0 ] || chown "$(stat -c %u:%g "$dir")" "$file"
+EOF
+# The image's own workspace gets it now, for a container without a workspace
+# mount: agent-browser refuses to run while AGENT_BROWSER_CONFIG names a
+# missing file. A mounted workspace gets it from the desktop's first start.
+RUN chmod 0755 /opt/wrap/bin/wrap-agent-browser-config \
+ && install -o "${WRAP_UID}" -g "${WRAP_GID}" -m 0644 /etc/wrap/agent-browser.json \
+      /home/user/workspace/agent-browser.json
+
+# wrapvm: agent-browser's guides (`agent-browser skills get core`). The native
+# build mise installs has no skill-data beside it (only the npm package ships
+# one), so it is fetched from the release the image installed. mise updates the
+# binary later on its own; the guides of this version stay until a rebuild.
+ENV AGENT_BROWSER_SKILLS_DIR=/opt/agent-browser/skill-data
+RUN v="$(sudo -u "${WRAP_USER_NAME}" -H sh -lc 'agent-browser --version' | awk '{print $2}')" \
+ && install -d /opt/agent-browser \
+ && curl -fsSL "https://github.com/vercel-labs/agent-browser/archive/refs/tags/v$v.tar.gz" \
+      | bsdtar -x -C /opt/agent-browser --strip-components 1 "agent-browser-$v/skill-data" \
+ && chmod -R a+rX /opt/agent-browser \
+ && sudo -u "${WRAP_USER_NAME}" -H env AGENT_BROWSER_SKILLS_DIR="$AGENT_BROWSER_SKILLS_DIR" sh -lc 'agent-browser skills get core' | head -3 | grep -qx 'name: core'
+
+# wrapvm: the desktop's sound. No hardware: one PulseAudio server per desktop,
+# started by wrap-desktop as the desktop's uid, whose only sink is a null one
+# named `output`. Chrome, ffmpeg and ALSA apps (through pulseaudio-alsa) play
+# into it; voxl streams its monitor, output.monitor, to the viewer, and
+# `ffmpeg -f pulse -i output.monitor` records it. The socket is
+# $XDG_RUNTIME_DIR/pulse/native, in a 0700 directory: any process of that uid
+# may play, whatever its HOME (so no cookie).
+RUN cat > /etc/wrap/pulse.pa <<'EOF'
+load-module module-native-protocol-unix auth-anonymous=1
+load-module module-null-sink sink_name=output sink_properties=device.description=Desktop
+set-default-sink output
+set-default-source output.monitor
+EOF
+# Clients find that server whatever their environment (a shell without
+# XDG_RUNTIME_DIR, root), and never spawn a second, sinkless one of their own.
+RUN install -d /etc/pulse/client.conf.d \
+ && printf '%s\n' 'autospawn = no' \
+      "default-server = unix:/tmp/wrap-desktop-${WRAP_UID}/runtime/pulse/native" \
+      > /etc/pulse/client.conf.d/50-wrapvm.conf
+
+# wrapvm: the shared desktop Chrome is the default browser, for everything
+# that opens a link: xdg-open, gio, GTK apps (mimeapps.list), XFCE's own
+# launchers (exo's WebBrowser helper) and CLI tools that read $BROWSER. All
+# of them go through wrap-chrome, so a link opens as a tab in the Chrome that
+# agent-browser and the person share, never in a second profile.
+ENV BROWSER=wrap-chrome
+RUN cat > /etc/xdg/mimeapps.list <<'EOF'
+[Default Applications]
+x-scheme-handler/http=wrap-chrome.desktop
+x-scheme-handler/https=wrap-chrome.desktop
+x-scheme-handler/about=wrap-chrome.desktop
+x-scheme-handler/unknown=wrap-chrome.desktop
+text/html=wrap-chrome.desktop
+application/xhtml+xml=wrap-chrome.desktop
+application/pdf=wrap-chrome.desktop
+EOF
+RUN install -d /etc/xdg/xfce4 \
+ && printf '%s\n' 'WebBrowser=wrap-chrome' > /etc/xdg/xfce4/helpers.rc \
+ && cat > /usr/share/xfce4/helpers/wrap-chrome.desktop <<'EOF'
+[Desktop Entry]
+NoDisplay=true
+Version=1.0
+Type=X-XFCE-Helper
+X-XFCE-Category=WebBrowser
+X-XFCE-Commands=wrap-chrome
+X-XFCE-CommandsWithParameter=wrap-chrome "%s"
+Icon=google-chrome
+Name=Google Chrome (shared desktop)
+EOF
+
+# wrapvm: the prompt says [vm:<machine>] under smolvm, [container:<host>] in a
+# container. smolvm's guest init leaves /run/smolvm; zshenv and login shells
+# both source wrap.sh, so the choice is made there.
+RUN sed 's/container:\$hostname/vm:\$hostname/' /etc/wrap/starship.toml > /etc/wrap/starship-vm.toml \
+ && grep -q 'vm:\$hostname' /etc/wrap/starship-vm.toml \
+ && printf '%s\n' '[ -d /run/smolvm ] && export STARSHIP_CONFIG=/etc/wrap/starship-vm.toml' >> /etc/profile.d/wrap.sh
+
+# wrapvm: the desktop and browser skills, global for agents (pi, Claude Code,
+# Codex read ~/.agents/skills). Seeded into /etc/skel and both existing homes;
+# /etc/wrap/skills keeps a copy for an agent whose HOME is somewhere else.
+COPY skills/ /etc/wrap/skills/
+RUN for home in /etc/skel /root /home/user; do \
+      install -d "$home/.agents/skills"; \
+      cp -a /etc/wrap/skills/. "$home/.agents/skills/"; \
+    done \
+ && chmod -R a+rX /etc/wrap/skills \
+ && chown -R "${WRAP_UID}:${WRAP_GID}" /home/user/.agents
 
 # XFCE look: no top bar, one centered bottom dock with three launchers
 # (Chrome / Thunar / Terminal) on a transparent panel, solid navy backdrop,
@@ -732,6 +915,7 @@ trust_local_cas() {
       && say "chrome trusts $ca"
   done
 }
+pulse_up() { pactl info >/dev/null 2>&1; }
 cdp_up() { curl -fsS -m 1 "http://127.0.0.1:$WRAP_DESKTOP_CDP_PORT/json/version" >/dev/null 2>&1; }
 viewer_on() { case "$WRAP_DESKTOP_VIEWER_PORT" in ''|0) return 1 ;; esac; }
 viewer_up() { curl -fsS -m 1 -o /dev/null "http://127.0.0.1:$WRAP_DESKTOP_VIEWER_PORT/healthz" 2>/dev/null; }
@@ -774,8 +958,8 @@ ensure_password() {
 
 # voxl on every guest interface (the port publish targets the guest NIC). The
 # password reaches it through its environment, which only its own uid can read,
-# never through argv, which any uid sees in ps. Audio is off: no sound server
-# runs here. WRAP_DESKTOP_VOXL_ARGS adds flags, e.g. --allowed-hosts=NAME to
+# never through argv, which any uid sees in ps. Audio is the PulseAudio sink's
+# monitor (voxl's default output.monitor). WRAP_DESKTOP_VOXL_ARGS adds flags, e.g. --allowed-hosts=NAME to
 # answer for a proxy's host name, or --read-only.
 start_viewer() {
   ensure_password || { say "viewer: cannot keep a password in $(password_file)"; return 1; }
@@ -786,7 +970,7 @@ start_viewer() {
     export VOXL_PASSWORD="$pw"
     # shellcheck disable=SC2086 # a list of flags, split on purpose
     spawn viewer voxl --addr=0.0.0.0 --port="$WRAP_DESKTOP_VIEWER_PORT" \
-      --audio-enabled=false --title="$title" $WRAP_DESKTOP_VOXL_ARGS
+      --title="$title" $WRAP_DESKTOP_VOXL_ARGS
   )
 }
 
@@ -845,6 +1029,19 @@ start() {
     # directly (xfwm4, xfdesktop, panel) instead of launching its own X/dbus.
     spawn xfce startxfce4
     say "desktop up on $DISPLAY ($WRAP_DESKTOP_GEOMETRY)"
+  fi
+  /opt/wrap/bin/wrap-agent-browser-config
+  # Sound, before the viewer and Chrome connect to it; the owner's only, as
+  # accessibility is.
+  if owns_desktop && ! pulse_up; then
+    rm -f "$run_dir/pulse.pid"
+    spawn pulse pulseaudio -n -F /etc/wrap/pulse.pa --daemonize=no --use-pid-file=no \
+      --exit-idle-time=-1 --log-target=stderr
+    i=0
+    until pulse_up; do
+      i=$((i + 1)); [ "$i" -lt 50 ] || { say "sound server did not come up (see $log)"; break; }
+      sleep 0.1
+    done
   fi
   # The viewer streams this uid's desktop; another uid's `start` (a `sudo -i`
   # login shell) leaves it to the owner, as it does accessibility.
@@ -940,6 +1137,10 @@ export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNT
 if [ "${WRAP_DESKTOP_AUTOSTART:-1}" = 1 ] && [ -x /opt/wrap/bin/wrap-desktop ]; then
   /opt/wrap/bin/wrap-desktop start --quiet >/dev/null 2>&1 || true
 fi
+export AGENT_BROWSER_CONFIG="${AGENT_BROWSER_CONFIG:-/home/user/workspace/agent-browser.json}"
+export AGENT_BROWSER_SKILLS_DIR="${AGENT_BROWSER_SKILLS_DIR:-/opt/agent-browser/skill-data}"
+export BROWSER="${BROWSER:-wrap-chrome}"
+/opt/wrap/bin/wrap-agent-browser-config 2>/dev/null || true
 EOF
 
 # Short operator/agent note about what is wired up.
@@ -954,15 +1155,22 @@ RUN cat > /etc/wrap/desktop.md <<'EOF'
 - One persistent Google Chrome on that desktop (no window until something opens
   one; the dock's Chrome icon opens a window in the same instance), CDP on
   127.0.0.1:9222 (and :9223 on guest interfaces for publishing), profile in
-  ~/.config/wrap-chrome. Launch flags (default --no-sandbox and WebMCP) come
+  ~/.config/wrap-chrome. Launch flags (default: WebMCP) come
   from ~/.config/chrome-flags.conf, else /etc/wrap/chrome-flags.conf. First-run, sign-in, sync, default-browser,
   privacy-sandbox, keyring and promo prompts are disabled via managed policies in
-  /etc/opt/chrome/policies/managed and /opt/google/chrome/initial_preferences.
-- agent-browser is preconfigured (~/.agent-browser/config.json, `cdp: 9222`) to
-  attach to that Chrome: `agent-browser open https://example.com` acts in the
+  /etc/opt/chrome/policies/managed and /opt/google/chrome/initial_preferences
+  (arm64: Chromium, which reads the same files through /etc/chromium).
+- agent-browser reads $AGENT_BROWSER_CONFIG (/home/user/workspace/agent-browser.json,
+  written once when missing: `{"headed": true, "autoConnect": true}`), so it
+  attaches to that Chrome: `agent-browser open https://example.com` acts in the
   same browser a human sees in the viewer and can take over (log in, solve a captcha,
-  hand back). A project-level ./agent-browser.json still overrides, e.g. drop
-  `cdp` to get an isolated headed Chrome instead. `agent-browser doctor` verifies.
+  hand back). Edit that file per workspace; it replaces ~/.agent-browser/config.json.
+  `agent-browser doctor` verifies.
+- ffmpeg is installed (e.g. record :1 with `ffmpeg -f x11grab -i :1 out.mp4`).
+- Sound: a PulseAudio server per desktop with one null sink, `output`; ALSA's default
+  device plays into it, the viewer streams it, `ffmpeg -f pulse -i output.monitor` records it.
+- The shared Chrome is the default browser: xdg-open, XFCE and $BROWSER open links
+  as tabs in it (wrap-chrome).
   Pages' WebMCP tools: `agent-browser webmcp list` / `webmcp invoke <tool>`.
 - agent-desktop (installed too, no download on first use) sees and drives the
   desktop's apps through AT-SPI: `agent-desktop list-apps`, `snapshot --app
