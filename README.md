@@ -11,9 +11,8 @@
 
 ## 2 Run with Apple Container (MicroVM):
 
-* `container system start`
 * `rm -rf /tmp/wrapvm-arm64.tar && docker save -o /tmp/wrapvm-arm64.tar wrapvm-arm64:local`
-* `container image load --input /tmp/wrapvm-arm64.tar`
+* `container system start ; container image load --input /tmp/wrapvm-arm64.tar`
 
 + `container build ...` to customise image or `container run ...` to execute directly.
 
