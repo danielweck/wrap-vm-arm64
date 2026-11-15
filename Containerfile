@@ -190,6 +190,10 @@ RUN cat > /etc/profile.d/wrap.sh <<'EOF'
 #export MISE_CONFIG_DIR=/opt/mise/config
 #export MISE_TRUSTED_CONFIG_PATHS="${MISE_TRUSTED_CONFIG_PATHS:-/opt/mise/config}"
 export STARSHIP_CONFIG=/etc/wrap/starship.toml
+case ":$PATH:" in
+  *":/opt/wrap/bin:"*) ;;
+  *) export PATH="/usr/local/bin:/opt/wrap/bin:$PATH" ;;
+esac
 #case ":$PATH:" in
 #  *":/opt/mise/data/shims:"*) ;;
 #  *) export PATH="/usr/local/bin:/opt/mise/data/shims:/opt/wrap/bin:$PATH" ;;
