@@ -43,14 +43,15 @@ FROM ${BASE_IMAGE}
 # shim: <tool>". Declaring the path trusted keeps the toolchain working for any
 # HOME value.
 # ---------------------------------------------------------------------------
-ENV MISE_DATA_DIR=/opt/mise/data \
-    MISE_CONFIG_DIR=/opt/mise/config \
-    MISE_TRUSTED_CONFIG_PATHS=/opt/mise/config
+#ENV MISE_DATA_DIR=/opt/mise/data \
+#    MISE_CONFIG_DIR=/opt/mise/config \
+#    MISE_TRUSTED_CONFIG_PATHS=/opt/mise/config
 
+#:/opt/mise/data/shims
 # Build-time identity only; the runtime identity is set at the end of the file.
 ENV HOME=/root \
     USER=root \
-    PATH=/usr/local/bin:/opt/mise/data/shims:/opt/wrap/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH=/usr/local/bin:/opt/wrap/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     STARSHIP_CONFIG=/etc/wrap/starship.toml
 
 # Unprivileged identity. uid/gid 1000 matches the common single-user host uid,
@@ -58,9 +59,10 @@ ENV HOME=/root \
 ENV WRAP_UID=1000 \
     WRAP_GID=1000 \
     WRAP_USER_NAME=user \
-    WRAP_USER_HOME=/home/user \
-    WRAP_TOOLCHAIN_GID=900 \
-    WRAP_TOOLCHAIN_GROUP=toolchain
+    WRAP_USER_HOME=/home/user
+#     \
+#    WRAP_TOOLCHAIN_GID=900 \
+#    WRAP_TOOLCHAIN_GROUP=toolchain
 
 # Upstream Arch's mirrors and keyring are x86_64-only. Leave ALARM's
 # mirrorlist in place and update its own keyring instead.
@@ -74,7 +76,13 @@ ENV WRAP_UID=1000 \
 #      pacman -Sy --noconfirm archlinuxarm-keyring; \
 #    fi
 
-RUN pacman -Syu --noconfirm \
+#--disable-sandbox
+#--disable-sandbox-syscalls FOR Superlogical Rex
+RUN echo 'DisableSandboxSyscalls' | tee -a /etc/pacman.conf && \
+mkdir /tmp/empty-hooks && \
+pacman -Syu \
+      --hookdir /tmp/empty-hooks \
+      --noconfirm \
       base-devel \
       ca-certificates \
       clang \
@@ -101,24 +109,40 @@ RUN pacman -Syu --noconfirm \
       which \
       zsh \
       starship \
- && if pacman -Si mise >/dev/null 2>&1; then \
-      pacman -S --noconfirm mise; \
-    else \
-      curl -fsSL https://mise.run -o /tmp/wrap-mise-install \
-      && MISE_INSTALL_PATH=/usr/bin/mise sh /tmp/wrap-mise-install \
-      && rm /tmp/wrap-mise-install; \
-    fi \
- && install -d /opt/mise/config/conf.d /opt/wrap/bin /etc/wrap \
+      nodejs \
+      npm \
+      pnpm \
+      worktrunk \
+      go \
+      openssh \
+      xclip \
+      rsync \
+      less \
+ && install -d /opt/wrap/bin /etc/wrap \
  && if ! grep -qx '/bin/zsh' /etc/shells; then echo /bin/zsh >> /etc/shells; fi \
  && if ! grep -qx '/usr/bin/zsh' /etc/shells; then echo /usr/bin/zsh >> /etc/shells; fi \
  && (chsh -s /bin/zsh root || true) \
  && rm -rf /var/cache/pacman/pkg/*
 
+#      bun \
+#      rust \
+#      cargo \
+#      rustup \
+
+# && if pacman -Si mise >/dev/null 2>&1; then \
+#      pacman -S --noconfirm mise; \
+#    else \
+#      curl -fsSL https://mise.run -o /tmp/wrap-mise-install \
+#      && MISE_INSTALL_PATH=/usr/bin/mise sh /tmp/wrap-mise-install \
+#      && rm /tmp/wrap-mise-install; \
+#    fi \
+# && install -d /opt/mise/config/conf.d /opt/wrap/bin /etc/wrap \
+
 # Declare tools without downloading them. reshim creates mise's bootstrap
 # commands; first use installs just the requested tool, later uses auto-update.
 # mise comes from pacman when available, or the upstream installer on ALARM.
-COPY resources/mise.toml /opt/mise/config/config.toml
-RUN mise reshim
+#COPY resources/mise.toml /opt/mise/config/config.toml
+#RUN mise reshim
 
 # ---------------------------------------------------------------------------
 # Unprivileged `user` (uid/gid 1000) with passwordless sudo.
@@ -133,24 +157,27 @@ RUN mise reshim
 # entry gives the original uid a name after `user` moves to the host uid;
 # it follows `user` so getpwuid still prefers the live account before that.
 # ---------------------------------------------------------------------------
+
 RUN groupadd -g "${WRAP_GID}" "${WRAP_USER_NAME}" 2>/dev/null || true \
- && groupadd -g "${WRAP_TOOLCHAIN_GID}" "${WRAP_TOOLCHAIN_GROUP}" 2>/dev/null || true \
  && useradd -m -d "${WRAP_USER_HOME}" -u "${WRAP_UID}" -g "${WRAP_GID}" \
       -s /bin/zsh "${WRAP_USER_NAME}" 2>/dev/null || true \
- && useradd -o -u "${WRAP_UID}" -g "${WRAP_TOOLCHAIN_GROUP}" -M -d /opt/mise \
-      -s /usr/bin/nologin builder 2>/dev/null || true \
- && usermod -aG wheel,"${WRAP_TOOLCHAIN_GROUP}" "${WRAP_USER_NAME}" \
  && printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "${WRAP_USER_NAME}" \
       > /etc/sudoers.d/10-wrap-user \
- && printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/11-wrap-wheel \
- && chmod 0440 /etc/sudoers.d/10-wrap-user /etc/sudoers.d/11-wrap-wheel \
+ && chmod 0440 /etc/sudoers.d/10-wrap-user \
  && visudo -c \
  && install -d -o "${WRAP_UID}" -g "${WRAP_GID}" "${WRAP_USER_HOME}/workspace" \
  && chown -R "${WRAP_UID}:${WRAP_GID}" "${WRAP_USER_HOME}" \
- && chown -R "${WRAP_UID}:${WRAP_TOOLCHAIN_GID}" /opt/mise \
- && chmod -R g+rwX /opt/mise \
- && find /opt/mise -type d -exec chmod g+s {} + \
  && chmod 0755 "${WRAP_USER_HOME}"
+
+# && printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/11-wrap-wheel \
+# && chmod 0440 /etc/sudoers.d/10-wrap-user /etc/sudoers.d/11-wrap-wheel \
+# && groupadd -g "${WRAP_TOOLCHAIN_GID}" "${WRAP_TOOLCHAIN_GROUP}" 2>/dev/null || true \
+# && useradd -o -u "${WRAP_UID}" -g "${WRAP_TOOLCHAIN_GROUP}" -M -d /opt/mise \
+#      -s /usr/bin/nologin builder 2>/dev/null || true \
+# && usermod -aG wheel,"${WRAP_TOOLCHAIN_GROUP}" "${WRAP_USER_NAME}" \
+# && chown -R "${WRAP_UID}:${WRAP_TOOLCHAIN_GID}" /opt/mise \
+# && chmod -R g+rwX /opt/mise \
+# && find /opt/mise -type d -exec chmod g+s {} + \
 
 # ---------------------------------------------------------------------------
 # Shell environment. MISE_* and PATH are re-exported here so they survive
@@ -159,20 +186,20 @@ RUN groupadd -g "${WRAP_GID}" "${WRAP_USER_NAME}" 2>/dev/null || true \
 # The PATH prepend is idempotent so nested shells do not stack duplicates.
 # ---------------------------------------------------------------------------
 RUN cat > /etc/profile.d/wrap.sh <<'EOF'
-export MISE_DATA_DIR=/opt/mise/data
-export MISE_CONFIG_DIR=/opt/mise/config
-export MISE_TRUSTED_CONFIG_PATHS="${MISE_TRUSTED_CONFIG_PATHS:-/opt/mise/config}"
+#export MISE_DATA_DIR=/opt/mise/data
+#export MISE_CONFIG_DIR=/opt/mise/config
+#export MISE_TRUSTED_CONFIG_PATHS="${MISE_TRUSTED_CONFIG_PATHS:-/opt/mise/config}"
 export STARSHIP_CONFIG=/etc/wrap/starship.toml
-case ":$PATH:" in
-  *":/opt/mise/data/shims:"*) ;;
-  *) export PATH="/usr/local/bin:/opt/mise/data/shims:/opt/wrap/bin:$PATH" ;;
-esac
+#case ":$PATH:" in
+#  *":/opt/mise/data/shims:"*) ;;
+#  *) export PATH="/usr/local/bin:/opt/mise/data/shims:/opt/wrap/bin:$PATH" ;;
+#esac
 EOF
 
 RUN cat > /etc/zsh/zshenv <<'EOF'
 [ -f /etc/profile.d/wrap.sh ] && . /etc/profile.d/wrap.sh
 if [[ -o interactive && -t 1 ]]; then
-  eval "$(/usr/bin/mise activate zsh)"
+#  eval "$(/usr/bin/mise activate zsh)"
   eval "$(starship init zsh)"
 fi
 EOF
