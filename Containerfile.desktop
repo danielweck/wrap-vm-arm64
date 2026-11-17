@@ -1,22 +1,3 @@
-# # THIS FORK: support for ARM64 Apple Silicon, merged "desktop" `wrapvm` into base `wrap`
-#
-# * See https://github.com/tobi/wrap/tree/c562a7d2d2dd96600641ffad4c52297ab3bb345a
-# * See https://github.com/tobi/wrapvm/tree/41e3b0b3ef40fde457241cd7f17ae3410455256f
-# * See https://github.com/tobi/wrapvm/pull/2 ( https://github.com/htaoufikallah/wrapvm/commit/c25cc0d535aa64b2ea2476f9daa5336abc496461 )
-#
-# ## 1 Build with Docker:
-#
-# * `docker image remove wrap-arm64:local ; docker buildx build --platform linux/arm64 --load -f Containerfile -t wrap-arm64:local .`
-# * `docker image remove wrapvm-arm64:local ; docker buildx build --platform linux/arm64 --load -f Containerfile.desktop -t wrapvm-arm64:local .`
-#
-# ## 2 Run with Apple Container (MicroVM):
-#
-# * `rm -rf /tmp/wrapvm-arm64.tar && docker save -o /tmp/wrapvm-arm64.tar wrapvm-arm64:local`
-# * `container system start ; container image load --input /tmp/wrapvm-arm64.tar`
-#
-# + `container build ...` to customise image or `container run ...` to execute directly.
-
-
 # wrapvm: tobi/wrap's desktop (Containerfile.desktop at c562a7d) plus ffmpeg and
 # a workspace agent-browser config. This file is the one definition of the VM:
 # CI publishes it as ghcr.io/tobi/wrapvm:desktop, which the Smolfile boots.
@@ -68,7 +49,7 @@ ENV HOME=/root USER=root CARGO_HOME=/tmp/cargo PATH=/usr/bin:/bin
 # BuildKit's seccomp profile refuses ("restricting filesystem access failed"),
 # so every pacman call in this file passes it. Requires pacman >= 7.1, which
 # both wrap bases have.
-RUN pacman -Syu --disable-sandbox --noconfirm --needed rust esbuild x264 libyuv opus libpulse \
+RUN pacman -Syu --disable-sandbox --noconfirm --needed esbuild x264 libyuv opus libpulse \
  && rm -rf /var/cache/pacman/pkg/*
 # Arch's libyuv ships no pkg-config file, and voxl's build.rs asks pkg-config
 # for every library it links.
@@ -86,7 +67,8 @@ Cflags: -I${includedir}
 EOF
 # main after v0.3.2: it also rebuilds the capture when the X screen changes size
 # (tembo/voxl#49) and no longer panics on a screen below 640x480 (#54).
-ARG VOXL_REV=f5d6ec93dd2745a680054071eae31aec45049a49
+#f5d6ec93dd2745a680054071eae31aec45049a49
+ARG VOXL_REV=1b411238124781a6080641a89805f62ea1ecb29b
 RUN git init -q /src/voxl \
  && git -C /src/voxl fetch -q --depth 1 https://github.com/tembo/voxl "${VOXL_REV}" \
  && git -C /src/voxl checkout -q FETCH_HEAD \

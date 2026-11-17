@@ -142,7 +142,6 @@ pacman -Syu \
       zig \
       rust \
       cargo \
-      rustup \
       vim \
       vi \
  && install -d /opt/wrap/bin /etc/wrap \
