@@ -144,7 +144,7 @@ pacman -Syu \
       cargo \
       rustup \
       vim \
-      vi
+      vi \
  && install -d /opt/wrap/bin /etc/wrap \
  && if ! grep -qx '/bin/zsh' /etc/shells; then echo /bin/zsh >> /etc/shells; fi \
  && if ! grep -qx '/usr/bin/zsh' /etc/shells; then echo /usr/bin/zsh >> /etc/shells; fi \
