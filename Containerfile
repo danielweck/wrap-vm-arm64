@@ -1,3 +1,22 @@
+# # THIS FORK: support for ARM64 Apple Silicon, merged "desktop" `wrapvm` into base `wrap`
+#
+# * See https://github.com/tobi/wrap/tree/c562a7d2d2dd96600641ffad4c52297ab3bb345a
+# * See https://github.com/tobi/wrapvm/tree/41e3b0b3ef40fde457241cd7f17ae3410455256f
+# * See https://github.com/tobi/wrapvm/pull/2 ( https://github.com/htaoufikallah/wrapvm/commit/c25cc0d535aa64b2ea2476f9daa5336abc496461 )
+#
+# ## 1 Build with Docker:
+#
+# * `docker image remove wrap-arm64:local ; docker buildx build --platform linux/arm64 --load -f Containerfile -t wrap-arm64:local .`
+# * `docker image remove wrapvm-arm64:local ; docker buildx build --platform linux/arm64 --load -f Containerfile.desktop -t wrapvm-arm64:local .`
+#
+# ## 2 Run with Apple Container (MicroVM):
+#
+# * `rm -rf /tmp/wrapvm-arm64.tar && docker save -o /tmp/wrapvm-arm64.tar wrapvm-arm64:local`
+# * `container system start ; container image load --input /tmp/wrapvm-arm64.tar`
+#
+# + `container build ...` to customise image or `container run ...` to execute directly.
+
+
 # arm64 (aarch64) variant for Apple Silicon hosts.
 # Keep the shared runtime, shell and lazy-toolchain setup in sync with
 # ./Containerfile. Arch Linux ARM supplies the base, mirrorlist and keyring;
@@ -109,6 +128,7 @@ pacman -Syu \
       which \
       zsh \
       starship \
+      bun \
       nodejs \
       npm \
       pnpm \
@@ -118,16 +138,18 @@ pacman -Syu \
       xclip \
       rsync \
       less \
+      xfsprogs \
+      zig \
+      rust \
+      cargo \
+      rustup \
+      vim \
+      vi
  && install -d /opt/wrap/bin /etc/wrap \
  && if ! grep -qx '/bin/zsh' /etc/shells; then echo /bin/zsh >> /etc/shells; fi \
  && if ! grep -qx '/usr/bin/zsh' /etc/shells; then echo /usr/bin/zsh >> /etc/shells; fi \
  && (chsh -s /bin/zsh root || true) \
  && rm -rf /var/cache/pacman/pkg/*
-
-#      bun \
-#      rust \
-#      cargo \
-#      rustup \
 
 # && if pacman -Si mise >/dev/null 2>&1; then \
 #      pacman -S --noconfirm mise; \
