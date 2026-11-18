@@ -6,12 +6,12 @@
 
 ## 1 Build with Docker:
 
-* `docker image remove wrap-arm64:local ; docker buildx build --platform linux/arm64 --load -f Containerfile -t wrap-arm64:local .`
-* `docker image remove wrapvm-arm64:local ; docker buildx build --platform linux/arm64 --load -f Containerfile.desktop -t wrapvm-arm64:local .`
+* `docker image remove wrap-arm64-local ; docker buildx build --platform linux/arm64 --load -f Containerfile -t wrap-arm64-local .`
+* `docker image remove wrapvm-arm64-local ; docker buildx build --platform linux/arm64 --load -f Containerfile.desktop -t wrapvm-arm64-local .`
 
 ## 2 Run with Apple Container (MicroVM):
 
-* `rm -rf /tmp/wrapvm-arm64.tar && docker save -o /tmp/wrapvm-arm64.tar wrapvm-arm64:local`
+* `rm -rf /tmp/wrapvm-arm64.tar && docker save -o /tmp/wrapvm-arm64.tar wrapvm-arm64-local`
 * `container system start ; container image load --input /tmp/wrapvm-arm64.tar`
 
 + `container build ...` to customise image or `container run ...` to execute directly.
