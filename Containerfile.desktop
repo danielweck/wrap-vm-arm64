@@ -100,7 +100,8 @@ EOF
 # main after v0.3.2: it also rebuilds the capture when the X screen changes size
 # (tembo/voxl#49) and no longer panics on a screen below 640x480 (#54).
 #f5d6ec93dd2745a680054071eae31aec45049a49
-ARG VOXL_REV=1b411238124781a6080641a89805f62ea1ecb29b
+#1b411238124781a6080641a89805f62ea1ecb29b
+ARG VOXL_REV=21f194f9e446e7073abd7bbd52e0b397c3800b42
 RUN git init -q /src/voxl \
  && git -C /src/voxl fetch -q --depth 1 https://github.com/tembo/voxl "${VOXL_REV}" \
  && git -C /src/voxl checkout -q FETCH_HEAD \
